@@ -1,0 +1,133 @@
+# version 3
+
+name: iOS Build and TestFlight
+
+on:
+  push:
+    branches: ["dev"]
+
+jobs:
+  ios-build:
+    name: iOS Dev Build
+    permissions: write-all
+    runs-on: self-hosted
+    
+    steps:
+      - name: Show self-hosted machine information
+        run: uname -a
+      
+      - name: Cancel previous runs
+        uses: styfle/cancel-workflow-action@0.12.1
+        with:
+          access_token: ${{ github.token }}
+      
+      - name: Checkout repo from dev branch
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Setup SSH for GitHub access
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      # - name: Clean iOS build environment and caches
+      #   working-directory: ios
+      #   run: |
+      #     rm -rf Pods build
+      #     rm -rf ~/Library/Caches/CocoaPods || true
+      #     rm -rf ~/Library/Developer/Xcode/DerivedData
+      
+      - name: Setup Ruby (for self-hosted runners)
+        run: |
+          ruby --version
+          gem install bundler -v 2.4.21 || true
+      
+      - name: Cache vendored gems
+        uses: actions/cache@v4
+        with:
+          path: vendor/bundle
+          key: ${{ runner.os }}-gems-${{ hashFiles('**/Gemfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-gems-
+      
+      - name: Install gems with locked versions (vendored)
+        run: |
+          bundle install
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: yarn
+      
+      - name: Cache node modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            .yarn/cache
+            node_modules
+          key: ${{ runner.os }}-yarn-${{ hashFiles('yarn.lock') }}-v2
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+      
+      - name: Install dependencies with yarn
+        run: yarn install --frozen-lockfile
+      
+      - name: Clear Metro bundler cache
+        run: |
+          rm -rf $TMPDIR/metro-* || true
+          rm -rf $TMPDIR/haste-map-* || true
+      
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ios/Pods
+          key: ${{ runner.os }}-pods-${{ hashFiles('**/Podfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pods-
+
+      - name: Install CocoaPods dependencies
+        working-directory: ios
+        run: |
+          # Ensure CocoaPods is using the correct version from Gemfile
+          bundle exec pod install
+      
+      - name: Verify lock files haven't changed
+        run: |
+          if git diff --exit-code yarn.lock Gemfile.lock; then
+            echo "✅ Lock files are unchanged"
+          else
+            echo "❌ Lock files were modified!"
+            git diff yarn.lock Gemfile.lock
+            exit 1
+          fi
+      
+      - name: Setup code signing with fastlane match
+        working-directory: ios
+        run: bundle exec fastlane match appstore --readonly
+        env:
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      
+      - name: Build and deploy to TestFlight
+        working-directory: ios
+        run: bundle exec fastlane build_testflight --verbose
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      
+      - name: Upload build artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-logs
+          path: |
+            ios/fastlane/report.xml
+            ios/fastlane/logs/
+          retention-days: 7
